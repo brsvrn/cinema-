@@ -95,7 +95,11 @@ class SupabaseStore:
     def __init__(self):
         self.url = config.SUPABASE_URL
         self.key = config.SUPABASE_SERVICE_KEY
-        self.h = {"apikey": self.key, "Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
+        # New-style secret keys (sb_secret_...) go only in `apikey`; legacy JWT keys also as Bearer.
+        self.auth = {"apikey": self.key}
+        if self.key.startswith("eyJ"):
+            self.auth["Authorization"] = f"Bearer {self.key}"
+        self.h = {**self.auth, "Content-Type": "application/json"}
         self.bucket = config.SUPABASE_BUCKET
         self.owner_id = config.__dict__.get("OWNER_ID") or None
 
@@ -140,15 +144,14 @@ class SupabaseStore:
         ctype = mimetypes.guess_type(str(local))[0] or "application/octet-stream"
         with open(local, "rb") as f:
             r = requests.post(f"{self.url}/storage/v1/object/{self.bucket}/{key}",
-                              headers={"apikey": self.key, "Authorization": f"Bearer {self.key}",
-                                       "Content-Type": ctype, "x-upsert": "true"}, data=f, timeout=600)
+                              headers={**self.auth, "Content-Type": ctype, "x-upsert": "true"}, data=f, timeout=600)
         if r.status_code >= 400:
             raise RuntimeError(f"storage upload {key}: {r.status_code} {r.text[:200]}")
         return f"supabase://{self.bucket}/{key}"
 
     def download(self, key: str, local: Path) -> bool:
         r = requests.get(f"{self.url}/storage/v1/object/{self.bucket}/{key}",
-                         headers={"apikey": self.key, "Authorization": f"Bearer {self.key}"}, timeout=600)
+                         headers=self.auth, timeout=600)
         if r.status_code != 200:
             return False
         local.parent.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,7 @@ import type { Doc } from "./types";
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const BUCKET = process.env.SUPABASE_BUCKET || "studio";
+const AUTH: Record<string, string> = SB_KEY.startsWith("eyJ") ? { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } : { apikey: SB_KEY };
 const LOCAL_DIR = process.env.STUDIO_DATA_DIR || path.join(process.cwd(), "..", "worker", "data");
 const INDEX: Record<string, string[]> = {
   episodes: ["series_id", "status", "episode_number"],
@@ -19,7 +20,7 @@ export const backend = SB_URL && SB_KEY ? "supabase" : "local";
 async function rest(method: string, p: string, body?: unknown, headers: Record<string, string> = {}) {
   const r = await fetch(`${SB_URL}/rest/v1/${p}`, {
     method,
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", ...headers },
+    headers: { ...AUTH, "Content-Type": "application/json", ...headers },
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
   });
@@ -93,7 +94,7 @@ export async function fileUrl(key: string | undefined, download = false): Promis
   if (backend === "supabase") {
     const r = await fetch(`${SB_URL}/storage/v1/object/sign/${BUCKET}/${key}`, {
       method: "POST",
-      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json" },
+      headers: { ...AUTH, "Content-Type": "application/json" },
       body: JSON.stringify({ expiresIn: 60 * 60 * 6 }),
       cache: "no-store",
     });

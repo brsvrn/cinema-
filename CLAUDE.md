@@ -138,6 +138,12 @@ Not used (by design): Google Colab (manual only; same CLI works there), Blender 
 advanced 3D), Remotion (Skia+FFmpeg covers compositing without a Node render farm), Whisper
 (subtitles come from the script with exact TTS timings).
 
+## Live resources
+- Supabase project `cinema-studio` (ref `fpytljzquqqvgrowrwbf`, eu-central-1, free tier), URL
+  `https://fpytljzquqqvgrowrwbf.supabase.co`. Schema applied; demo series seeded with 4 queued jobs
+  (2× character_sheets, ep001, ep002) for the first cloud worker run.
+- Supabase keys: prefer the new `sb_secret_…` secret key (sent only as `apikey`); legacy JWT keys also work.
+
 ## Conventions
 - UI text Turkish; code/comments English. Commit small, test before push.
 - Never commit `.env*`, `worker/data`, `worker/work`, `worker/.models`.
