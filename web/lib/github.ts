@@ -9,9 +9,13 @@ export async function wakeWorker(reason: string): Promise<{ ok: boolean; detail:
   if (!token || !repo) return { ok: false, detail: "GH_DISPATCH_TOKEN/GH_REPO tanımlı değil - zamanlanmış çalıştırma bekleniyor" };
   const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${wf}/dispatches`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "cinema-studio-pwa" },
     body: JSON.stringify({ ref, inputs: { reason: reason.slice(0, 60) } }),
     cache: "no-store",
   });
-  return { ok: r.status === 204, detail: r.status === 204 ? "worker tetiklendi" : `GitHub ${r.status}` };
+  const body = r.status === 204 ? "" : (await r.text()).slice(0, 300);
+  const res = { ok: r.status === 204, detail: r.status === 204 ? "Worker tetiklendi" : `GitHub ${r.status}: ${body}` };
+  console.log("[wakeWorker]", reason, res.ok ? "ok" : res.detail);
+  return res;
 }

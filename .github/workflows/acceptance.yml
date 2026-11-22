@@ -25,3 +25,4 @@ jobs:
             worker/work/ser_fener_ep00*/storyboard.png
             worker/work/sheets/
           retention-days: 30
+# registered on default branch

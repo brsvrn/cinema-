@@ -51,3 +51,4 @@ jobs:
       - name: Process queue
         if: env.pending != '0'
         run: python -m studio worker --max-jobs 6 --idle-exit 90
+# registered on default branch

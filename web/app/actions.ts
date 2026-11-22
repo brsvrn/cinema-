@@ -42,6 +42,7 @@ export async function enqueue(kind: string, episodeId: string | null, data: Reco
   await put("jobs", id, { kind, episode_id: episodeId, status: "queued", data: { kind, episode_id: episodeId, ...data },
     estimate_usd: estimateUsd, created_at: Date.now() / 1000, attempts: 0 });
   const w = await wakeWorker(`${kind} ${episodeId ?? ""}`);
+  await put("settings", "worker_wake", { ...w, at: Date.now() / 1000, reason: kind });
   return { id, wake: w };
 }
 
@@ -186,7 +187,8 @@ export async function retryJob(form: FormData) {
   const j = await get("jobs", id);
   if (!j) return;
   await put("jobs", id, { ...j, status: "queued", error: null, attempts: 0 });
-  await wakeWorker(`retry ${id}`);
+  const w = await wakeWorker(`retry ${id}`);
+  await put("settings", "worker_wake", { ...w, at: Date.now() / 1000, reason: "retry" });
   revalidatePath("/queue");
 }
 
@@ -198,7 +200,8 @@ export async function cancelJob(form: FormData) {
 }
 
 export async function wake() {
-  await wakeWorker("manual");
+  const w = await wakeWorker("manual");
+  await put("settings", "worker_wake", { ...w, at: Date.now() / 1000, reason: "manual" });
   revalidatePath("/queue");
 }
 
