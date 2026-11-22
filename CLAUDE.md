@@ -143,8 +143,8 @@ advanced 3D), Remotion (Skia+FFmpeg covers compositing without a Node render far
   `https://fpytljzquqqvgrowrwbf.supabase.co`. Schema applied; demo series seeded with 4 queued jobs
   (2× character_sheets, ep001, ep002) for the first cloud worker run.
 - Vercel project `cinema-studio` (team vertice6, `prj_k0DbcF6SfXupCdmwS4DAEmUrNO7J`, root `web/`, functions fra1),
-  production URL `https://cinema-studio-vertice6.vercel.app`, deploys from branch `ccr-a1e6e0c9-3i4spd`.
-  Plain env set: SUPABASE_URL, SUPABASE_BUCKET, GH_REPO, GH_REF, GH_WORKFLOW. Owner must add secrets:
+  production URLs `https://cinema-studio-nu.vercel.app` / `https://cinema-studio-vertice6.vercel.app` (Vercel auth only on previews), deploys from branch `ccr-a1e6e0c9-3i4spd`.
+  Plain env: SUPABASE_URL, SUPABASE_BUCKET, GH_REPO, GH_REF, GH_WORKFLOW. Owner-entered sensitive env (present 2026-11-22):
   SUPABASE_SERVICE_ROLE_KEY, STUDIO_PASSWORD, STUDIO_SESSION_SECRET, GH_DISPATCH_TOKEN (sensitive).
 - Supabase keys: prefer the new `sb_secret_…` secret key (sent only as `apikey`); legacy JWT keys also work.
 
