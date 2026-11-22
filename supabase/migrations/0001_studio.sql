@@ -61,6 +61,9 @@ create table if not exists public.jobs (
   finished_at timestamptz
 );
 create index if not exists jobs_claim_idx on public.jobs(status, priority desc, created_at);
+create index if not exists jobs_episode_idx on public.jobs(episode_id);
+create index if not exists characters_series_idx on public.characters(series_id);
+create index if not exists locations_series_idx on public.locations(series_id);
 
 create table if not exists public.cost_ledger (
   id text primary key default ('cost_' || replace(gen_random_uuid()::text, '-', '')),
@@ -80,7 +83,7 @@ create table if not exists public.settings (
 );
 
 -- ---------------------------------------------------------------- updated_at
-create or replace function public.touch_updated_at() returns trigger language plpgsql as $$
+create or replace function public.touch_updated_at() returns trigger language plpgsql set search_path = '' as $$
 begin new.updated_at = now(); return new; end $$;
 
 do $$ declare t text; begin
@@ -144,6 +147,9 @@ $$;
 revoke execute on function public.claim_job(text, int) from public, anon, authenticated;
 revoke execute on function public.heartbeat_job(text, text, int) from public, anon, authenticated;
 revoke execute on function public.finish_job(text, text, text, text) from public, anon, authenticated;
+grant execute on function public.claim_job(text, int) to service_role;
+grant execute on function public.heartbeat_job(text, text, int) to service_role;
+grant execute on function public.finish_job(text, text, text, text) to service_role;
 
 -- ---------------------------------------------------------------- storage
 insert into storage.buckets (id, name, public)
