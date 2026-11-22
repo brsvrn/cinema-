@@ -1,0 +1,27 @@
+name: Acceptance (2 episodes)
+# Produces the two acceptance episodes from scratch on a free runner and keeps the MP4s as artifacts.
+on:
+  workflow_dispatch:
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults: { run: { working-directory: worker } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: worker/requirements.txt }
+      - uses: actions/cache@v4
+        with: { path: worker/.models, key: models-v1 }
+      - run: bash bin/setup_worker.sh
+      - run: python -m studio acceptance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-episodes
+          path: |
+            worker/work/ser_fener_ep00*/out/
+            worker/work/ser_fener_ep00*/storyboard.png
+            worker/work/sheets/
+          retention-days: 30

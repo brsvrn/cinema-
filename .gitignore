@@ -1,0 +1,15 @@
+# python worker
+__pycache__/
+*.pyc
+worker/data/
+worker/work/
+worker/.models/
+.pytest_cache/
+# env / secrets
+.env
+.env.*
+!.env.example
+# node
+node_modules/
+.next/
+.vercel/
