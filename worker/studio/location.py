@@ -46,6 +46,7 @@ class EnvState:
     boat_signal: float = 0.0   # distant boat flashing light (0..1)
     boat_x: float = 0.35       # 0..1 across horizon
     fireflies: float = 0.0
+    room_lamp: float = 1.0     # interior oil lamp (lighthouse room)
     extra: dict = field(default_factory=dict)
 
 
@@ -70,6 +71,18 @@ class LighthouseCliff:
         self._flies = [(self.rng.uniform(0, STAGE_W), self.rng.uniform(900, 1450), self.rng.uniform(0, 6.28))
                        for _ in range(40)]
         self._pictures: dict[str, skia.Picture] = {}
+
+    def objects(self, view_w: float = 900.0) -> dict[str, tuple[float, float, float, float]]:
+        """name -> (x, y, parallax, view width for an insert shot)."""
+        return {
+            "lamp": (self.tower_x, self.tower_top + 140, 0.7, view_w),
+            "tower": (self.tower_x, (self.tower_top + self.tower_base) / 2, 0.7, 2200.0),
+            "door": (self.tower_x - 20, self.tower_base - 260, 0.7, 1300.0),
+            "boat": (lerp(-200, STAGE_W + 200, 0.35), HORIZON_Y - 40, 0.25, 1000.0),
+            "sea": (STAGE_W * 0.3, HORIZON_Y + 60, 0.25, 2600.0),
+            "bench": (self.loc.get("spots", {}).get("bench", 1100), GROUND_Y - 160, 1.0, 1100.0),
+            "ground": (900, GROUND_Y + 20, 1.0, 900.0),
+        }
 
     def set_lighting(self, name: str):
         self.lighting_name = name
@@ -299,22 +312,25 @@ class LighthouseCliff:
         self._boat(c, bx, by, env)
         c.restore()
 
+        self.draw_set(c, cam, env)
+
+        if blur:
+            c.restore()
+
+    def draw_set(self, c: skia.Canvas, cam, env: EnvState):
+        """Mid/foreground set pieces (overridden by other outdoor sets)."""
         # lighthouse (parallax 0.7)
         c.save()
         cam.apply(c, 0.7)
         c.drawPicture(self._record("tower", self._draw_tower))
         self._draw_lamp(c, env)
         c.restore()
-
         # cliff/ground (parallax 1.0)
         c.save()
         cam.apply(c, 1.0)
         c.drawPicture(self._record("cliff", self._draw_cliff))
-        self._draw_grass(c, t, env)
+        self._draw_grass(c, env.t, env)
         c.restore()
-
-        if blur:
-            c.restore()
 
     def draw_foreground(self, c: skia.Canvas, cam, env: EnvState):
         """Atmosphere drawn in front of characters: lamp beam, rain, fireflies."""
@@ -429,10 +445,11 @@ class LighthouseCliff:
             c.drawLine(x, y, x + sway, y - hgt, stroke(dark if k > 0.5 else light, 4))
 
 
-LOCATION_KINDS = {"lighthouse_cliff": LighthouseCliff}
+LOCATION_KINDS: dict[str, type] = {"lighthouse_cliff": LighthouseCliff}
 
 
 def make_location(loc: dict[str, Any], lighting: str):
+    from . import locations_extra  # noqa: F401  (registers more set kinds)
     kind = loc.get("kind", "lighthouse_cliff")
     return LOCATION_KINDS[kind](loc, lighting)
 
@@ -440,16 +457,16 @@ def make_location(loc: dict[str, Any], lighting: str):
 def object_camera(loc_obj, name: str, view_w: float = 900.0) -> tuple[float, float, float]:
     """Camera key (cx, cy, view_w) that centres a named set object, compensating parallax."""
     ax, ay = STAGE_W / 2, STAGE_H / 2
-    if isinstance(loc_obj, LighthouseCliff):
-        table = {
-            "lamp": (loc_obj.tower_x, loc_obj.tower_top + 140, 0.7, view_w),
-            "tower": (loc_obj.tower_x, (loc_obj.tower_top + loc_obj.tower_base) / 2, 0.7, 2200.0),
-            "door": (loc_obj.tower_x - 20, loc_obj.tower_base - 260, 0.7, 1300.0),
-            "boat": (lerp(-200, STAGE_W + 200, 0.35), HORIZON_Y - 40, 0.25, 1000.0),
-            "sea": (STAGE_W * 0.3, HORIZON_Y + 60, 0.25, 2600.0),
-            "bench": (loc_obj.loc.get("spots", {}).get("bench", 1100), GROUND_Y - 160, 1.0, 1100.0),
-            "ground": (900, GROUND_Y + 20, 1.0, 900.0),
-        }
-        x, y, p, vw = table.get(name, (ax, ay, 1.0, view_w))
-        return ax + (x - ax) / p, ay + (y - ay) / p, vw
-    return ax, ay, view_w
+    table = loc_obj.objects(view_w) if hasattr(loc_obj, "objects") else {}
+    x, y, p, vw = table.get(name, (ax, ay, 1.0, view_w))
+    return ax + (x - ax) / p, ay + (y - ay) / p, vw
+
+
+def world_objects(loc_obj) -> dict[str, tuple[float, float, float]]:
+    """Object positions in stage space (for look-at targets and facing)."""
+    ax, ay = STAGE_W / 2, STAGE_H / 2
+    out = {}
+    for name, (x, y, p, _vw) in (loc_obj.objects() if hasattr(loc_obj, "objects") else {}).items():
+        # project layer position into the character layer (p=1) so look-at directions are right
+        out[name] = (ax + (x - ax) / p if p < 1 else x, y, 0.0)
+    return out

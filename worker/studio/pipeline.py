@@ -24,14 +24,15 @@ import skia
 from . import config
 from .bible import apply_episode, memory_brief
 from .continuity import check_script, resolve_blocking
-from .location import GROUND_Y, HORIZON_Y, make_location, object_camera
+from .location import GROUND_Y, make_location, object_camera, world_objects
 from .lipsync import cues_for
 from .performance import Performance
 from .publish import metadata, thumbnail, write_srt
 from .qc import check_master, check_segment
 from .render import FrameRenderer, RenderContext, encode_shot, still
 from .rig import CharacterRig
-from .storyboard import TimedBeat, build_shots, episode_duration, time_beats
+from .storyboard import Shot, TimedBeat, build_shots, episode_duration, time_beats, time_scenes
+from .camera import CamKey
 from .tts import synthesize
 from . import audio as audio_mod
 from . import writer
@@ -61,16 +62,36 @@ class PipelineError(RuntimeError):
     pass
 
 
-def world_objects(loc) -> dict[str, tuple[float, float, float]]:
-    return {
-        "lamp": (loc.tower_x, loc.tower_top + 140, 0.0),
-        "tower": (loc.tower_x, 700.0, 0.0),
-        "door": (loc.tower_x - 20, GROUND_Y - 120, 0.0),
-        "boat": (1060.0, HORIZON_Y, 0.0),
-        "sea": (500.0, HORIZON_Y + 40, 0.0),
-        "ground": (860.0, GROUND_Y + 10, 0.0),
-        "bench": (float(loc.loc.get("spots", {}).get("bench", 1100)), GROUND_Y - 100, 0.0),
-    }
+SHORTS_MAX = 58.0
+
+
+def normalize_script(script: dict) -> dict:
+    """Flatten `scenes` into one beat list (each beat tagged with `_scene`).
+
+    Single-scene (legacy 30 s) scripts become one scene built from the top-level fields.
+    """
+    s = json.loads(json.dumps(script))
+    if s.get("scenes"):
+        beats, metas = [], []
+        for k, sc in enumerate(s["scenes"]):
+            for b in sc.get("beats", []):
+                beats.append({**b, "_scene": k})
+            metas.append({kk: vv for kk, vv in sc.items() if kk != "beats"})
+        s["beats"] = beats
+        s["scenes"] = metas
+        first = metas[0]
+        for key in ("location_id", "lighting", "blocking", "env_start", "ambience", "music_mood"):
+            if key in first and key not in s:
+                s[key] = first[key]
+    else:
+        s["beats"] = [{**b, "_scene": 0} for b in s.get("beats", [])]
+        s["scenes"] = [{"id": "s1", **{k: s[k] for k in ("location_id", "lighting", "blocking", "env_start",
+                                                          "ambience", "music_mood") if k in s}}]
+    return s
+
+
+def is_long(script: dict) -> bool:
+    return len(script.get("scenes", [])) > 1 or float(script.get("target_seconds", 30)) > 90
 
 
 class Pipeline:
@@ -226,7 +247,7 @@ class Pipeline:
             import hashlib
             self.state["script_hash"] = hashlib.sha256(json.dumps(script, sort_keys=True, ensure_ascii=False)
                                                        .encode()).hexdigest()[:16]
-        script = dict(script)
+        script = normalize_script(script)
         script["id"] = self.episode_id
         self._json_w("script.json", script)
 
@@ -244,44 +265,152 @@ class Pipeline:
         if not rep["ok"] and not self.force:
             raise PipelineError("tutarlılık hatası: " + "; ".join(rep["errors"]))
 
-    def _context(self, timed: list[TimedBeat], shots=None, lighting=None) -> tuple[RenderContext, Performance, Any]:
+    # ------------------------------------------------------------ timing
+    def _layout(self, durations: dict[int, float]) -> dict:
+        script = self._json_r("script.json")
+        if is_long(script):
+            timed, ranges, total = time_scenes(script["beats"], durations, min_seconds=script.get("min_seconds"))
+        else:
+            timed = time_beats(script["beats"], durations, TARGET_SECONDS)
+            total = episode_duration(timed, TARGET_SECONDS)
+            ranges = [(0.0, total)]
+        return {"beats": [{"id": t.id, "type": t.type, "start": t.start, "end": t.end} for t in timed],
+                "scenes": ranges, "duration": total, "long": is_long(script)}
+
+    def _timeline(self) -> dict:
+        tl = self._json_r("timeline.json")
+        if isinstance(tl, list):  # legacy format
+            last = tl[-1]["end"] if tl else 0
+            tl = {"beats": tl, "scenes": [(0.0, max(TARGET_SECONDS, last + 1.4))],
+                  "duration": max(TARGET_SECONDS, last + 1.4), "long": False}
+        return tl
+
+    def _timed(self) -> list[TimedBeat]:
+        script = self._json_r("script.json")
+        tl = self._timeline()
+        voices = self._json_r("voices.json")
+        cues = self._json_r("lipsync.json")
+        out = []
+        for t in tl["beats"]:
+            tb = TimedBeat(t["id"], t["type"], t["start"], t["end"], script["beats"][t["id"]])
+            if str(t["id"]) in voices:
+                tb.audio = voices[str(t["id"])]["wav"]
+                tb.cues = cues.get(str(t["id"]), [])
+            out.append(tb)
+        return out
+
+    # ------------------------------------------------------------ scene contexts
+    def _scene_cast(self, script: dict, k: int, series: dict) -> list[str]:
+        sc = script["scenes"][k]
+        if sc.get("cast"):
+            return list(sc["cast"])
+        cast = set((sc.get("blocking") or {}).keys())
+        for b in script["beats"]:
+            if b.get("_scene", 0) != k:
+                continue
+            if b.get("speaker"):
+                cast.add(b["speaker"])
+            for key in ("moves", "poses", "props", "expressions", "looks", "glow"):
+                cast |= set((b.get(key) or {}).keys())
+        if k == 0 and not cast:
+            cast = set(series["characters"])
+        return [c for c in series["characters"] if c in cast]
+
+    def _contexts(self, timed: list[TimedBeat], shots: list[Shot] | None = None, tl: dict | None = None):
+        """One render context per scene (own location, lighting, blocking, performance)."""
         ep, series, chars, locs = self._world()
         script = self._json_r("script.json")
-        loc_rec = locs[script["location_id"]]
-        loc = make_location(loc_rec, lighting or script.get("lighting", "day"))
-        blocking, env0 = resolve_blocking(script, series, chars)
-        perf = Performance(timed, blocking, loc_rec.get("spots", {}), world_objects(loc), seed=self.episode_id, env0=env0)
-        rigs = {cid: CharacterRig(chars[cid]["design"]) for cid in blocking}
-        dur = episode_duration(timed, TARGET_SECONDS)
-        if shots is None:
-            heights = {cid: rigs[cid].H for cid in rigs}
-            cams = {name: object_camera(loc, name) for name in ("lamp", "tower", "door", "boat", "sea", "bench", "ground")}
-            shots = build_shots(timed, blocking, heights, dur, cams, seed=self.episode_id,
-                                xpos=lambda cid, t: perf.char_x(cid, t)[0])
-        caps = [(tb.start, tb.end + 0.15, tb.data["text"]) for tb in timed if tb.type == "line"]
-        ctx = RenderContext(loc, rigs, perf, shots, dur, caps,
-                            title=(series["title"], f"Bölüm {script['episode_number']}: {script['title']}"),
-                            quality=self.quality)
-        return ctx, perf, loc
+        tl = tl or self._timeline()
+        total = tl["duration"]
+        long_ = tl.get("long", False)
+        out = []
+        prev = None
+        shot_list: list[Shot] = []
+        for k, sc in enumerate(script["scenes"]):
+            t0, t1 = tl["scenes"][k]
+            loc_rec = locs[sc.get("location_id", script["location_id"])]
+            loc = make_location(loc_rec, sc.get("lighting", script.get("lighting", "day")))
+            cast = self._scene_cast(script, k, series)
+            if k == 0:
+                base, env0 = resolve_blocking(script, series, chars)
+                blocking = {c: base[c] for c in cast if c in base}
+            else:
+                continuous = sc.get("continuous", prev is not None and
+                                    prev["location_id"] == sc.get("location_id", script["location_id"]))
+                blocking, env0 = {}, {}
+                if continuous and prev:
+                    blocking = {c: dict(prev["end_blocking"][c]) for c in cast if c in prev["end_blocking"]}
+                    env0 = {kk: vv for kk, vv in prev["end_env"].items() if kk == "lamp"}
+            for c in cast:
+                b = dict(blocking.get(c, {}))
+                b.update((sc.get("blocking") or {}).get(c, {}))
+                if "x" not in b:
+                    n = len([x for x in blocking if x != c])
+                    b.update(x=1100 + 600 * n, dir=1 if n % 2 == 0 else -1)
+                    b["turn"] = 0.45 * b["dir"]
+                blocking[c] = b
+            env0 = {**env0, **(sc.get("env_start") or {})}
+            beats_k = [tb for tb in timed if tb.data.get("_scene", 0) == k]
+            perf = Performance(beats_k, blocking, loc_rec.get("spots", {}), world_objects(loc),
+                               seed=f"{self.episode_id}:{k}", env0=env0)
+            rigs = {cid: CharacterRig(chars[cid]["design"]) for cid in blocking}
+            if shots is None:
+                heights = {cid: rigs[cid].H for cid in rigs}
+                cams = {name: object_camera(loc, name) for name in loc.objects()}
+                sk = build_shots(beats_k, blocking, heights, t1, cams, seed=f"{self.episode_id}:{k}",
+                                 xpos=lambda cid, t, perf=perf: perf.char_x(cid, t)[0], t0=t0, scene=k,
+                                 index_offset=len(shot_list))
+                shot_list += sk
+            else:
+                sk = [s for s in shots if s.scene == k]
+            caps = [(tb.start, tb.end + 0.15, tb.data["text"]) for tb in timed if tb.type == "line"]
+            ctx = RenderContext(loc, rigs, perf, sk, total, caps,
+                                title=(series["title"], f"Bölüm {script['episode_number']}: {script['title']}") if k == 0 else None,
+                                quality=self.quality)
+            ctx.end_card_at = (total - 4.5) if long_ else None
+            ctx.series_name = series["title"]
+            end_blocking = {}
+            for cid, ct in perf.chars.items():
+                b = dict(perf.blocking[cid])
+                b["x"] = perf.char_x(cid, t1)[0]
+                b["prop"] = ct.prop.at(t1)[1]
+                b["glow"] = ct.glow.at(t1)[1] or 0.0
+                b["pose"] = ct.pose.at(t1)[1] or "idle"
+                b["expression"] = "neutral"
+                end_blocking[cid] = b
+            end_env = {kk: tr.keys[-1][1] for kk, tr in perf.env.items() if tr.keys}
+            prev = {"location_id": sc.get("location_id", script["location_id"]), "end_blocking": end_blocking,
+                    "end_env": end_env, "start_blocking": {cid: {"x": perf.char_x(cid, t0)[0], "prop": ct.prop.at(t0)[1]}
+                                                           for cid, ct in perf.chars.items()}}
+            out.append({"ctx": ctx, "perf": perf, "loc": loc, "t0": t0, "t1": t1, **prev})
+        return out
 
-    def _contact_sheet(self, ctx: RenderContext, out: Path, cols: int = 4):
-        tw, th = 480, 270
-        n = len(ctx.shots)
+    def _all_shots(self, scs) -> list[Shot]:
+        return [s for sc in scs for s in sc["ctx"].shots]
+
+    # ------------------------------------------------------------ storyboard
+    def _contact_sheet(self, scs, shots: list[Shot], out: Path):
+        n = len(shots)
+        cols = 4 if n <= 16 else 6
+        tw, th = (480, 270) if n <= 16 else (320, 180)
         rows = (n + cols - 1) // cols
-        surf = skia.Surface(cols * tw + (cols + 1) * 10, rows * (th + 40) + 10)
+        surf = skia.Surface(cols * tw + (cols + 1) * 10, rows * (th + 34) + 10)
         c = surf.getCanvas()
         c.clear(skia.Color(24, 24, 28))
-        font = skia.Font(skia.Typeface.MakeFromFile(config.font_path(True)), 16)
-        r = FrameRenderer(ctx, tw, th, False)
-        for i, sh in enumerate(ctx.shots):
+        font = skia.Font(skia.Typeface.MakeFromFile(config.font_path(True)), 14)
+        renderers = {}
+        for i, sh in enumerate(shots):
+            sc = scs[sh.scene]
+            r = renderers.get(sh.scene) or FrameRenderer(sc["ctx"], tw, th, False)
+            renderers[sh.scene] = r
             t = (sh.start + sh.end) / 2
             r.render(max(sh.start, t - 0.05), sh)
             arr = r.render(t, sh)
             img = skia.Image.fromarray(arr, colorType=skia.kBGRA_8888_ColorType)
             x = 10 + (i % cols) * (tw + 10)
-            y = 10 + (i // cols) * (th + 40)
+            y = 10 + (i // cols) * (th + 34)
             c.drawImage(img, x, y)
-            c.drawString(f"#{i} {sh.kind} {sh.start:.1f}-{sh.end:.1f}s {sh.subject or ''}", x, y + th + 24, font,
+            c.drawString(f"#{sh.index} S{sh.scene + 1} {sh.kind} {sh.start:.0f}-{sh.end:.0f}s", x, y + th + 20, font,
                          skia.Paint(Color=skia.ColorWHITE))
         surf.makeImageSnapshot().save(str(out), skia.kPNG)
         self._artifact(out)
@@ -289,35 +418,51 @@ class Pipeline:
     def stage_storyboard(self):
         script = self._json_r("script.json")
         est = {i: max(1.2, len(b["text"]) / 14.0) for i, b in enumerate(script["beats"]) if b["type"] == "line"}
-        timed = time_beats(script["beats"], est, TARGET_SECONDS)
-        ctx, _, _ = self._context(timed)
-        self._json_w("storyboard_draft.json", [s.to_json() for s in ctx.shots])
-        self._contact_sheet(ctx, self.work / "storyboard_draft.png")
+        tl = self._layout(est)
+        timed = [TimedBeat(t["id"], t["type"], t["start"], t["end"], script["beats"][t["id"]]) for t in tl["beats"]]
+        scs = self._contexts(timed, tl=tl)
+        shots = self._all_shots(scs)
+        self._json_w("storyboard_draft.json", [s.to_json() for s in shots])
+        self._contact_sheet(scs, shots, self.work / "storyboard_draft.png")
         key = f"{self.key_prefix}/storyboard_draft.png"
         self.store.upload(self.work / "storyboard_draft.png", key)
         ep = self.store.get("episodes", self.episode_id) or {}
         ep.setdefault("outputs", {})["storyboard_key"] = key
+        ep["estimated_duration"] = tl["duration"]
         self.store.put("episodes", self.episode_id, ep)
 
     def stage_voices(self):
         ep, series, chars, locs = self._world()
         script = self._json_r("script.json")
-        out = {}
+        out = self._json_r("voices.json") if (self.work / "voices.json").exists() else {}
         lines = [(i, b) for i, b in enumerate(script["beats"]) if b["type"] == "line"]
+        engines = set()
+        from .tts import resolve_engine
         for k, (i, b) in enumerate(lines):
-            wav = self.work / "voices" / f"beat_{i:02d}.wav"
-            dur = synthesize(b["text"], chars[b["speaker"]]["voice"], wav, cache_dir=config.WORK_DIR / "_tts_cache")
+            prof = chars[b["speaker"]]["voice"]
+            sig = f"{b['speaker']}|{resolve_engine(prof)}|{b['text']}"
+            prev = out.get(str(i))
+            if prev and prev.get("sig") == sig and (self.work / prev["wav"]).exists():
+                continue   # resume: this line was already voiced with the same text/voice
+            wav = self.work / "voices" / f"beat_{i:03d}.wav"
+            engines.add(resolve_engine(prof))
+            dur = synthesize(b["text"], prof, wav, cache_dir=config.WORK_DIR / "_tts_cache")
             self._artifact(wav)
-            out[str(i)] = {"wav": str(wav.relative_to(self.work)), "duration": dur, "speaker": b["speaker"]}
-            self._progress("voices", (k + 1) / len(lines))
+            out[str(i)] = {"wav": str(wav.relative_to(self.work)), "duration": dur, "speaker": b["speaker"], "sig": sig}
+            if k % 10 == 0:
+                self._json_w("voices.json", out)   # checkpoint long episodes
+                self._progress("voices", (k + 1) / len(lines))
+        valid = {str(i) for i, _ in lines}
+        out = {k: v for k, v in out.items() if k in valid}
         self._json_w("voices.json", out)
+        self.log(f"  ses motoru: {', '.join(sorted(engines)) or 'önbellek'}")
 
     def stage_animate(self):
-        script = self._json_r("script.json")
         voices = self._json_r("voices.json")
         durs = {int(k): v["duration"] for k, v in voices.items()}
-        timed = time_beats(script["beats"], durs, TARGET_SECONDS)
-        self._json_w("timeline.json", [{"id": t.id, "type": t.type, "start": t.start, "end": t.end} for t in timed])
+        tl = self._layout(durs)
+        self._json_w("timeline.json", tl)
+        self.log(f"  süre: {tl['duration']:.1f} sn, {len(tl['scenes'])} sahne")
 
     def stage_lipsync(self):
         script = self._json_r("script.json")
@@ -328,45 +473,81 @@ class Pipeline:
             cues[k] = cues_for(self.work / v["wav"], b["text"])
         self._json_w("lipsync.json", cues)
 
-    def _timed(self) -> list[TimedBeat]:
+    def _shorts_window(self, timed: list[TimedBeat], tl: dict) -> tuple[float, float]:
+        """Pick a 45-58 s highlight for vertical Shorts/Reels/TikTok (long episodes only)."""
         script = self._json_r("script.json")
-        tl = self._json_r("timeline.json")
-        voices = self._json_r("voices.json")
-        cues = self._json_r("lipsync.json")
-        out = []
-        for t in tl:
-            tb = TimedBeat(t["id"], t["type"], t["start"], t["end"], script["beats"][t["id"]])
-            if str(t["id"]) in voices:
-                tb.audio = voices[str(t["id"])]["wav"]
-                tb.cues = cues.get(str(t["id"]), [])
-            out.append(tb)
-        return out
+        if "shorts_window" in script:
+            a_id, b_id = script["shorts_window"]
+            a = next(t.start for t in timed if t.id == a_id) - 1.0
+            b = next(t.end for t in timed if t.id == b_id) + 1.0
+            return max(0.0, a), min(tl["duration"], a + SHORTS_MAX, b)
+        lines = [t for t in timed if t.type == "line"]
+        weight = {"surprised": 3, "scared": 3, "excited": 3, "laugh": 2, "happy": 2, "curious": 2, "worried": 2}
+        best, best_score = (0.0, min(SHORTS_MAX, tl["duration"])), -1
+        for i, first in enumerate(lines):
+            a = max(0.0, first.start - 1.0)
+            end_lines = [ln for ln in lines[i:] if ln.end + 0.6 - a <= SHORTS_MAX]
+            if not end_lines:
+                continue
+            b = end_lines[-1].end + 0.6
+            if b - a < 40:
+                continue
+            score = sum(weight.get(ln.data.get("emotion"), 1) for ln in end_lines)
+            if score > best_score:
+                best, best_score = (round(a, 3), round(b, 3)), score
+        return best
 
     def stage_staging(self):
         timed = self._timed()
-        ctx, perf, loc = self._context(timed)
-        self._json_w("shots.json", [s.to_json() for s in ctx.shots])
-        self._contact_sheet(ctx, self.work / "storyboard.png")
+        tl = self._timeline()
+        scs = self._contexts(timed, tl=tl)
+        shots = self._all_shots(scs)
+        self._json_w("shots.json", [s.to_json() for s in shots])
+        if tl.get("long"):
+            a, b = self._shorts_window(timed, tl)
+            clipped = []
+            for s in shots:
+                if s.end <= a or s.start >= b:
+                    continue
+                d = s.to_json()
+                d.update(start=max(s.start, a), end=min(s.end, b), index=len(clipped))
+                clipped.append(d)
+            self._json_w("shorts.json", {"window": [a, b], "shots": clipped})
+            self.log(f"  Shorts kesiti: {a:.1f}-{b:.1f} sn ({b - a:.1f} sn)")
+        self._contact_sheet(scs, shots, self.work / "storyboard.png")
 
-    def _shots(self):
-        from .camera import CamKey
-        from .storyboard import Shot
+    def _load_shots(self, name: str) -> list[Shot]:
+        data = self._json_r(name)
+        if isinstance(data, dict):
+            data = data["shots"]
         out = []
-        for d in self._json_r("shots.json"):
+        for d in data:
             d = dict(d)
             d["cam_from"] = CamKey(**d["cam_from"])
             d["cam_to"] = CamKey(**d["cam_to"])
+            d.setdefault("scene", 0)
             out.append(Shot(**d))
         return out
+
+    def _shots(self, fmt: str = "youtube") -> list[Shot]:
+        if fmt == "shorts" and (self.work / "shorts.json").exists():
+            return self._load_shots("shorts.json")
+        return self._load_shots("shots.json")
+
+    def _shorts_window_saved(self) -> tuple[float, float] | None:
+        p = self.work / "shorts.json"
+        return tuple(json.loads(p.read_text())["window"]) if p.exists() else None
 
     def stage_audio(self):
         script = self._json_r("script.json")
         timed = self._timed()
-        ctx, perf, _ = self._context(timed, shots=self._shots())
-        dialogue = []
-        sfx_events = []
+        tl = self._timeline()
+        scs = self._contexts(timed, shots=self._shots(), tl=tl)
+        series = self.store.get("series", self._ep()["series_id"])
+        dialogue, sfx_events, amb = [], [], []
         for tb in timed:
             b = tb.data
+            perf = scs[b.get("_scene", 0)]["perf"]
             if tb.audio:
                 x = perf.char_x(b["speaker"], tb.start)[0]
                 dialogue.append((tb.start, self.work / tb.audio, (x - 1600) / 1600))
@@ -377,29 +558,46 @@ class Pipeline:
                 sfx_events.append((tb.start + float(off), name, float(gain), float(pan)))
             if b.get("moves"):
                 sfx_events.append((tb.start, "footsteps", 0.3, 0.0))
-        series = self.store.get("series", self._ep()["series_id"])
-        mus = audio_mod.music(ctx.duration, script.get("music_mood") or series.get("music_mood", "warm"),
-                              seed=series["id"])
-        amb = [tuple(a) for a in script.get("ambience", [["waves", 0.4]])]
-        stats = audio_mod.mix(ctx.duration, dialogue, sfx_events, amb, mus, self.work / "mix.wav")
+        import numpy as np
+        total = tl["duration"]
+        n = int(total * audio_mod.SR)
+        music = np.zeros(n, dtype=np.float32)
+        for k, sc in enumerate(script["scenes"]):
+            t0, t1 = tl["scenes"][k]
+            mood = sc.get("music_mood") or script.get("music_mood") or series.get("music_mood", "warm")
+            seg = audio_mod.music(max(2.0, t1 - t0 + 1.0), mood, seed=f"{series['id']}:{mood}")
+            i0 = int(t0 * audio_mod.SR)
+            seg = seg[: max(0, n - i0)]
+            music[i0:i0 + len(seg)] += seg
+            for a in sc.get("ambience") or script.get("ambience") or [["waves", 0.4]]:
+                amb.append((a[0], float(a[1]), t0, t1))
+        stats = audio_mod.mix(total, dialogue, sfx_events, amb, music, self.work / "mix.wav")
         self._artifact(self.work / "mix.wav")
-        self._json_w("audio.json", {"duration": ctx.duration, **stats})
+        self._json_w("audio.json", {"duration": total, **stats})
 
+    # ------------------------------------------------------------ render
     def render_shots(self, fmt: str, indices: list[int]) -> list[int]:
         """Render the given shots (no state writes - safe to call from worker processes)."""
         w, h, burn = FORMATS[fmt]
-        ctx, _, _ = self._context(self._timed(), shots=self._shots())
-        renderer = FrameRenderer(ctx, w, h, burn)
-        for sh in ctx.shots:
+        shots = self._shots(fmt)
+        scs = self._contexts(self._timed(), shots=self._load_shots("shots.json"))
+        win = self._shorts_window_saved() if fmt == "shorts" else None
+        renderers = {}
+        for sh in shots:
             if sh.index not in indices:
                 continue
+            ctx = scs[sh.scene]["ctx"]
+            ctx.shorts_window = win
+            r = renderers.get(sh.scene) or FrameRenderer(ctx, w, h, burn)
+            renderers[sh.scene] = r
             seg = self.work / "segments" / fmt / f"shot_{sh.index:03d}.mp4"
-            renderer.render(max(0.0, sh.start - 1 / config.FPS), sh)  # warm look-at anchors
-            encode_shot(ctx, sh, seg, w, h, burn, renderer=renderer)
+            r.render(max(0.0, sh.start - 1 / config.FPS), sh)  # warm look-at anchors
+            encode_shot(ctx, sh, seg, w, h, burn, renderer=r)
         return indices
 
     def _render_format(self, fmt: str, only: list[int] | None = None):
-        shots = self._shots()
+        shots = self._shots(fmt)
+        by_index = {s.index: s for s in shots}
         done = set(self.state["shots_done"].get(fmt, []))
         todo = [s.index for s in shots
                 if (only is not None and s.index in only) or
@@ -407,12 +605,10 @@ class Pipeline:
         if not todo:
             return
         workers = max(1, min(len(todo), int(os.environ.get("STUDIO_RENDER_PROCS", os.cpu_count() or 2))))
-        # longest shots first for better packing
-        todo.sort(key=lambda i: -(shots[i].end - shots[i].start))
+        todo.sort(key=lambda i: -(by_index[i].end - by_index[i].start))   # longest first
         t0 = time.time()
         if workers == 1:
-            futures_iter = ((i, self.render_shots(fmt, [i])) for i in todo)
-            results = futures_iter
+            results = ((i, self.render_shots(fmt, [i])) for i in todo)
         else:
             ex = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
             futs = {ex.submit(_render_job, str(self.work.parent), self.episode_id, fmt, [i], self.quality): i for i in todo}
@@ -424,7 +620,7 @@ class Pipeline:
             done.add(i)
             self.state["shots_done"][fmt] = sorted(done)
             self._save_state()
-            self.log(f"  {fmt} shot {i + 1}/{total} ({shots[i].kind}) done, {time.time() - t0:.0f}s elapsed")
+            self.log(f"  {fmt} shot {len(done)}/{total} ({by_index[i].kind}) done, {time.time() - t0:.0f}s elapsed")
             self._progress("render", len(done) / total / len(self.formats) +
                            (list(self.formats).index(fmt) / len(self.formats)))
         if workers > 1:
@@ -435,13 +631,20 @@ class Pipeline:
             self._render_format(fmt)
 
     def _assemble_format(self, fmt: str) -> Path:
-        shots = self._shots()
+        shots = self._shots(fmt)
         lst = self.work / "segments" / fmt / "list.txt"
         lst.write_text("".join(f"file 'shot_{s.index:03d}.mp4'\n" for s in shots))
         out = self.work / "out" / f"{self.episode_id}_{fmt}.mp4"
         out.parent.mkdir(parents=True, exist_ok=True)
+        win = self._shorts_window_saved() if fmt == "shorts" else None
+        audio_in = ["-i", str(self.work / "mix.wav")]
+        af = []
+        if win:
+            a, b = win
+            audio_in = ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(self.work / "mix.wav")]
+            af = ["-af", f"afade=t=in:d=0.4,afade=t=out:st={max(0.0, b - a - 1.2):.3f}:d=1.2"]
         subprocess.run([config.ffmpeg_bin(), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
-                        "-i", str(self.work / "mix.wav"), "-map", "0:v", "-map", "1:a", "-c:v", "copy",
+                        *audio_in, "-map", "0:v", "-map", "1:a", "-c:v", "copy", *af,
                         "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(out)], check=True)
         return out
 
@@ -451,10 +654,11 @@ class Pipeline:
             self._artifact(out)
 
     def _qc(self) -> dict:
-        shots = self._shots()
+        tl = self._timeline()
         report = {"formats": {}, "failed_shots": {}}
         for fmt in self.formats:
             w, h, _ = FORMATS[fmt]
+            shots = self._shots(fmt)
             failed = []
             for sh in shots:
                 seg = self.work / "segments" / fmt / f"shot_{sh.index:03d}.mp4"
@@ -463,7 +667,14 @@ class Pipeline:
                 if not r["ok"]:
                     failed.append({"shot": sh.index, "issues": r["issues"]})
             master = self.work / "out" / f"{self.episode_id}_{fmt}.mp4"
-            report["formats"][fmt] = check_master(master, w, h)
+            win = self._shorts_window_saved() if fmt == "shorts" else None
+            if win:
+                lo, hi = (win[1] - win[0]) - 1.0, min(60.0, (win[1] - win[0]) + 1.0)
+            elif tl.get("long"):
+                lo, hi = tl["duration"] * 0.97, tl["duration"] * 1.03
+            else:
+                lo, hi = 28.0, 32.5
+            report["formats"][fmt] = check_master(master, w, h, min_dur=lo, max_dur=hi)
             report["failed_shots"][fmt] = failed
         report["ok"] = all(r["ok"] for r in report["formats"].values()) and not any(report["failed_shots"].values())
         return report
@@ -494,19 +705,19 @@ class Pipeline:
         script = self._json_r("script.json")
         outs: dict[str, str] = {}
         timed = self._timed()
-        # subtitles
         tr = [(tb.start, tb.end + 0.15, tb.data["text"]) for tb in timed if tb.type == "line"]
         en = [(tb.start, tb.end + 0.15, tb.data.get("text_en", "")) for tb in timed if tb.type == "line"]
         files = {
             "srt_tr": write_srt(tr, self.work / "out" / f"{self.episode_id}.tr.srt"),
             "srt_en": write_srt(en, self.work / "out" / f"{self.episode_id}.en.srt"),
         }
-        # thumbnail from the most expressive close-up
         shots = self._shots()
         pick = next((s for s in shots if s.kind in ("cu", "mcu") and any(
             script["beats"][b].get("emotion") in ("surprised", "happy", "curious") for b in s.beat_ids)), shots[len(shots) // 2])
-        ctx, _, _ = self._context(timed, shots=shots)
+        scs = self._contexts(timed, shots=shots)
+        ctx = scs[pick.scene]["ctx"]
         ctx.title = None
+        ctx.end_card_at = None
         frame = still(ctx, pick, (pick.start + pick.end) / 2, 1920, 1080, self.work / "out" / "thumb_frame.png")
         files["thumbnail"] = thumbnail(frame, script["title"], series["title"], self.work / "out" / f"{self.episode_id}_thumb.png")
         meta = metadata(series, script, chars)
@@ -528,31 +739,25 @@ class Pipeline:
         ep, series, chars, locs = self._world()
         script = self._json_r("script.json")
         timed = self._timed()
-        ctx, perf, _ = self._context(timed, shots=self._shots())
-        end_t = ctx.duration
-        end_blocking = {}
-        for cid, ct in perf.chars.items():
-            b = dict(perf.blocking[cid])
-            b["x"] = perf.char_x(cid, end_t)[0]
-            b["prop"] = ct.prop.at(end_t)[1]
-            b["glow"] = ct.glow.at(end_t)[1] or 0.0
-            b["pose"] = ct.pose.at(end_t)[1] or "idle"
-            b["expression"] = "neutral"
-            end_blocking[cid] = b
-        env_end = {k: tr.keys[-1][1] for k, tr in perf.env.items() if tr.keys}
-        new_series = apply_episode(series, script, {"blocking": end_blocking, "env": env_end,
-                                                     "lighting": script.get("lighting")})
+        tl = self._timeline()
+        scs = self._contexts(timed, shots=self._shots(), tl=tl)
+        last, first = scs[-1], scs[0]
+        new_series = apply_episode(series, script, {"blocking": last["end_blocking"], "env": last["end_env"],
+                                                     "lighting": script["scenes"][-1].get("lighting"),
+                                                     "location_id": last["location_id"]})
         self.store.put("series", series["id"], new_series)
         ep["status"] = "ready"
-        ep["duration"] = ctx.duration
+        ep["duration"] = tl["duration"]
+        ep["scenes"] = len(scs)
+        ep["shorts_window"] = self._shorts_window_saved()
+        used = {c for sc in scs for c in sc["perf"].chars}
         ep["character_hashes"] = {cid: {"design": chars[cid]["design_hash"], "voice": chars[cid]["voice_hash"]}
-                                  for cid in chars}
-        ep["end_state"] = {"blocking": end_blocking, "env": env_end}
-        ep["start_state"] = {"blocking": {cid: {"x": perf.char_x(cid, 0.0)[0], "prop": ct.prop.at(0.0)[1]}
-                                          for cid, ct in perf.chars.items()}}
+                                  for cid in chars if cid in used}
+        ep["end_state"] = {"blocking": last["end_blocking"], "env": last["end_env"]}
+        ep["start_state"] = {"blocking": first["start_blocking"]}
         ep["pipeline"] = {**(ep.get("pipeline") or {}), "percent": 100, "stage": "publish", "stage_label": "Hazır"}
         self.store.put("episodes", self.episode_id, ep)
-        self.log(f"✔ {self.episode_id} hazır")
+        self.log(f"✔ {self.episode_id} hazır ({tl['duration']:.0f} sn)")
 
 
 def _render_job(work_root: str, episode_id: str, fmt: str, indices: list[int], quality: str) -> list[int]:

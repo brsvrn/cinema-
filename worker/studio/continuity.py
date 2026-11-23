@@ -18,6 +18,12 @@ def check_script(script: dict, series: dict, characters: dict[str, dict], locati
     if script.get("continues_from") and script["continues_from"] not in prev:
         errors.append(f"continues_from={script['continues_from']} henüz üretilmemiş")
 
+    for sc in script.get("scenes") or []:
+        lid = sc.get("location_id")
+        if lid and lid not in series.get("locations", []):
+            errors.append(f"sahne {sc.get('id')}: mekân {lid} dizide kayıtlı değil")
+        elif lid and lid not in locations:
+            errors.append(f"sahne {sc.get('id')}: mekân kaydı bulunamadı: {lid}")
     if script.get("location_id") not in series.get("locations", []):
         errors.append(f"mekân {script.get('location_id')} dizide kayıtlı değil")
     elif script["location_id"] not in locations:
@@ -72,7 +78,7 @@ def check_script(script: dict, series: dict, characters: dict[str, dict], locati
         for fid, learners in (b.get("teaches") or {}).items():
             for cid in learners:
                 known.setdefault(cid, set()).add(fid)
-    if line_count > 9:
+    if line_count > 9 and len(script.get("scenes") or [None]) <= 1 and float(script.get("target_seconds", 30)) <= 90:
         warnings.append(f"{line_count} replik 30 sn için fazla olabilir")
 
     open_ids = {t["id"] for t in open_threads(series)}

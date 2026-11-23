@@ -279,9 +279,16 @@ def mix(duration: float, dialogue: list[tuple[float, Path, float]], sfx_events: 
         r = add(sig, start, 0.95, pan * 0.35)
         if r:
             voice_env[r[0]:r[0] + r[1]] = 1.0
-    for name, gain in ambience:
-        sig = sfx(name, duration, seed=hash(name) % 1000)
-        add(sig, 0.0, gain, 0.0)
+    for item in ambience:
+        name, gain = item[0], item[1]
+        a0, a1 = (item[2], item[3]) if len(item) >= 4 else (0.0, duration)
+        seg = sfx(name, max(1.0, a1 - a0), seed=hash(name) % 1000)
+        fade = int(min(1.0, (a1 - a0) / 4) * SR)
+        if fade > 0 and len(seg) > 2 * fade:
+            seg = seg.copy()
+            seg[:fade] *= np.linspace(0, 1, fade)
+            seg[-fade:] *= np.linspace(1, 0, fade)
+        add(seg, a0, gain, 0.0)
     for start, name, gain, pan in sfx_events:
         add(sfx(name, seed=int(start * 100)), start, gain, pan)
     if music_track is not None:

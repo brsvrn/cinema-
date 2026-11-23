@@ -35,6 +35,7 @@ class Shot:
     beat_ids: list[int] = field(default_factory=list)
     description: str = ""
     flat: bool = False            # telephoto: no parallax zoom (inserts of far objects)
+    scene: int = 0                # index into script scenes (own location/lighting)
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -99,6 +100,48 @@ def episode_duration(timed: list[TimedBeat], target: float, tail: float = 1.4) -
     return max(target, timed[-1].end + tail) if timed else target
 
 
+def time_scenes(beats: list[dict], line_durations: dict[int, float], lead_in: float = 2.4,
+                gap: float = 0.4, scene_tail: float = 1.6, end_card: float = 4.5,
+                min_seconds: float | None = None) -> tuple[list[TimedBeat], list[tuple[float, float]], float]:
+    """See _time_scenes; if `min_seconds` is set, pauses and action beats are lengthened (never dialogue,
+    pauses capped at 1.2 s) so the episode reaches e.g. the 8-minute YouTube mid-roll threshold."""
+    timed, ranges, total = _time_scenes(beats, line_durations, lead_in, gap, scene_tail, end_card, 1.0)
+    if not min_seconds or total >= min_seconds:
+        return timed, ranges, total
+    n_gaps = max(1, len(beats) - 1)
+    action_total = sum(float(b.get("duration", 2.0)) for b in beats if b["type"] != "line")
+    need = min_seconds - total
+    extra_gap = min(1.2 - gap, need * 0.5 / n_gaps)
+    rest = need - extra_gap * n_gaps
+    k = 1.0 + max(0.0, rest) / max(1.0, action_total)
+    return _time_scenes(beats, line_durations, lead_in, gap + extra_gap, scene_tail, end_card, min(k, 2.0))
+
+
+def _time_scenes(beats: list[dict], line_durations: dict[int, float], lead_in: float,
+                 gap: float, scene_tail: float, end_card: float, action_k: float) -> tuple[list[TimedBeat], list[tuple[float, float]], float]:
+    """Natural-pace layout for long, multi-scene episodes (no stretching to a fixed length).
+
+    Returns (timed beats, [(scene_start, scene_end)], total_duration).  Each scene gets an
+    establishing lead-in; the last scene is followed by an end card.
+    """
+    out: list[TimedBeat] = []
+    ranges: list[tuple[float, float]] = []
+    t = 0.0
+    n_scenes = max(b.get("_scene", 0) for b in beats) + 1 if beats else 1
+    for sc in range(n_scenes):
+        idx = [i for i, b in enumerate(beats) if b.get("_scene", 0) == sc]
+        start = t
+        t += lead_in
+        for k, i in enumerate(idx):
+            b = beats[i]
+            d = line_durations[i] if b["type"] == "line" else float(b.get("duration", 2.0)) * action_k
+            out.append(TimedBeat(i, b["type"], round(t, 3), round(t + d, 3), b))
+            t += d + (gap if k < len(idx) - 1 else 0.0)
+        t += scene_tail + (end_card if sc == n_scenes - 1 else 0.0)
+        ranges.append((round(start, 3), round(t, 3)))
+    return out, ranges, round(t, 3)
+
+
 # ----------------------------------------------------------------- framing
 
 def _char_frame(x: float, height: float, kind: str, dir_: int) -> CamKey:
@@ -118,7 +161,7 @@ def _char_frame(x: float, height: float, kind: str, dir_: int) -> CamKey:
 
 def build_shots(timed: list[TimedBeat], blocking: dict[str, dict], heights: dict[str, float],
                 duration: float, objects: dict[str, tuple[float, float, float]], seed: str = "ep",
-                xpos=None) -> list[Shot]:
+                xpos=None, t0: float = 0.0, scene: int = 0, index_offset: int = 0) -> list[Shot]:
     """xpos(cid, t) -> stage x of a character at time t (accounts for walking)."""
     rng = random.Random(seed)
     shots: list[Shot] = []
@@ -139,23 +182,23 @@ def build_shots(timed: list[TimedBeat], blocking: dict[str, dict], heights: dict
 
     def add(kind, start, end, subject, other, a, b, hh=1.5, dof=0.0, beats=None, desc="", flat=False):
         shots.append(Shot(len(shots), round(start, 3), round(end, 3), kind, subject, other, a, b, hh, dof,
-                          beats or [], desc, flat))
+                          beats or [], desc, flat, scene))
 
     # establishing: crane/wide from sky down to two-shot
-    first_end = timed[0].start if timed else 1.2
+    first_end = timed[0].start if timed else t0 + 1.2
     est_from = CamKey(wide.cx + 250, wide.cy - 420, wide.view_w)
     if timed and timed[0].type == "action" and not timed[0].data.get("camera"):
         first_end = timed[0].end
-        beats0 = [0]
+        beats0 = [timed[0].id]
     else:
         beats0 = []
-    add("crane", 0.0, max(first_end, 1.0), None, None, est_from, CamKey(wide.cx, wide.cy, wide.view_w * 0.8), 0.6,
+    add("crane", t0, max(first_end, t0 + 1.0), None, None, est_from, CamKey(wide.cx, wide.cy, wide.view_w * 0.8), 0.6,
         beats=beats0, desc="establishing")
 
     last_speaker = None
     alt = 0
     for tb in timed:
-        if beats0 and tb.id == 0:
+        if beats0 and tb.id == beats0[0]:
             continue
         b = tb.data
         tm = (tb.start + tb.end) / 2
@@ -240,6 +283,6 @@ def build_shots(timed: list[TimedBeat], blocking: dict[str, dict], heights: dict
         else:
             merged.append(sh)
     for i, sh in enumerate(merged):
-        sh.index = i
+        sh.index = i + index_offset
     merged[-1].end = duration
     return merged

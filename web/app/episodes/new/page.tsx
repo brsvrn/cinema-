@@ -26,7 +26,7 @@ export default async function NewEpisode({ searchParams }: { searchParams: Promi
         <h3>Tahmini maliyet</h3>
         <table><tbody>{est.items.map((i) => <tr key={i.item}><td>{i.item}</td><td className="muted">{i.qty}</td><td>{i.free ? "ücretsiz" : `$${i.usd}`}</td></tr>)}
           <tr><td><b>Toplam</b></td><td /><td><b>${est.total}</b></td></tr></tbody></table>
-        {!llm && <p className="muted">ANTHROPIC_API_KEY tanımlı değil: senaryo ücretsiz şablon yazarıyla üretilir (basit). Claude bağlanınca dizi hafızasını okuyan tam senaryo yazımı açılır.</p>}
+        {!llm && <p className="muted">Bu formdan üretilen bölümler ücretsiz şablon yazarla 30 sn olur. 8–10 dakikalık uzun bölümlerin senaryosunu Claude Code oturumunda yazdırın (“yeni uzun bölüm yaz: konu…”); bölüm buraya hazır senaryoyla gelir.</p>}
         {mode === "cinematic" && <p className="muted">⚠ Sinematik mod RunPod GPU kullanır ve ücretlidir; Maliyet Kontrolü’nde ücretli işlemlere izin verilmeden başlamaz.</p>}
         <div className="row" style={{ marginTop: 12 }}>
           <button className="btn secondary" name="action" value="preview">📝 Senaryo + storyboard önizle</button>

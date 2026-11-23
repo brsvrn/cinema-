@@ -39,6 +39,29 @@ def cmd_init_demo(store, args=None):
     return SERIES["id"]
 
 
+def cmd_seed_ep3(store) -> str:
+    """Add Captain Nehir, the harbor + lighthouse-room sets and the long-form episode 3."""
+    from .demo.characters import NEHIR, LIGHTHOUSE_ROOM, HARBOR
+    from .demo.episode3 import EP3
+    sid = EP3["series_id"]
+    series = store.get("series", sid)
+    if NEHIR["id"] not in series["characters"]:
+        series["characters"].append(NEHIR["id"])
+    for loc in (LIGHTHOUSE_ROOM, HARBOR):
+        if loc["id"] not in series["locations"]:
+            series["locations"].append(loc["id"])
+        store.put("locations", loc["id"], {**loc, "series_id": sid, "approved": True})
+    store.put("series", sid, series)
+    if not store.get("characters", NEHIR["id"]):
+        store.put("characters", NEHIR["id"], new_character(NEHIR, sid))
+    eid = f"{sid}_ep{EP3['episode_number']:03d}"
+    store.put("episodes", eid, {"series_id": sid, "episode_number": EP3["episode_number"], "title": EP3["title"],
+                                "status": "draft", "mode": "economic", "topic": EP3["summary"], "script": EP3,
+                                "length": "long"})
+    print("episode 3 seeded:", eid)
+    return eid
+
+
 def cmd_sheets(store, cid: str, out_dir: Path):
     from .rig import render_mouth_chart, render_turnaround
     ch = store.get("characters", cid)
@@ -129,6 +152,7 @@ def main(argv=None):
     s.add_argument("--once", action="store_true")
     s.add_argument("--max-jobs", type=int, default=5)
     s.add_argument("--idle-exit", type=int, default=60)
+    sub.add_parser("seed-ep3")
     s = sub.add_parser("acceptance")
     s.add_argument("--formats", default="youtube,shorts")
     args = ap.parse_args(argv)
@@ -146,6 +170,8 @@ def main(argv=None):
                          ensure_ascii=False))
     elif args.cmd == "worker":
         cmd_worker(store, args.once, args.max_jobs, args.idle_exit)
+    elif args.cmd == "seed-ep3":
+        cmd_seed_ep3(store)
     elif args.cmd == "acceptance":
         rep = cmd_acceptance(store, args.formats.split(","))
         sys.exit(0 if rep["ok"] else 1)

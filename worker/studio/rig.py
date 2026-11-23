@@ -348,6 +348,18 @@ class CharacterRig:
             for i in range(-2, 3):
                 c.drawLine(x, y - s * 0.1, x + i * s * 0.38, y - s * 1.05,
                            stroke(col("#c98fae"), self.ow * 0.6))
+        elif prop == "letter":
+            s = self.H * 0.05
+            c.save()
+            c.rotate(-12, x, y)
+            r = skia.Rect.MakeXYWH(x - s * 0.9, y - s * 1.3, s * 1.8, s * 1.25)
+            c.drawRect(r, fill(col("#f3e7c8")))
+            c.drawRect(r, stroke(self.outline, self.ow * 0.8))
+            for k in range(3):
+                yy = y - s * 1.05 + k * s * 0.32
+                c.drawLine(x - s * 0.65, yy, x + s * 0.6, yy, stroke(col("#7a6a4a"), self.ow * 0.5))
+            c.drawCircle(x + s * 0.55, y - s * 0.25, s * 0.16, fill(col("#a8322a")))
+            c.restore()
         elif prop == "lantern":
             s = self.H * 0.05
             c.drawLine(x, y, x, y + s * 0.6, stroke(self.outline, self.ow))

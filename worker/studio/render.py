@@ -28,6 +28,9 @@ class RenderContext:
     captions: list[tuple[float, float, str]]
     title: tuple[str, str] | None = None  # (series, episode title)
     quality: str = "economic"             # economic | advanced
+    end_card_at: float | None = None      # long episodes: "to be continued" card
+    shorts_window: tuple[float, float] | None = None   # vertical highlight cut
+    series_name: str | None = None
 
 
 def _grade_filter(L: dict) -> skia.ColorFilter:
@@ -67,7 +70,8 @@ class FrameRenderer:
     def _env(self, t: float) -> EnvState:
         p = self.ctx.perf
         return EnvState(t=t, lamp=p.env_at("lamp", t), boat_signal=p.env_at("boat_signal", t),
-                        rain=p.env_at("rain", t), fireflies=p.env_at("fireflies", t))
+                        rain=p.env_at("rain", t), fireflies=p.env_at("fireflies", t),
+                        room_lamp=p.env_at("room_lamp", t))
 
     def _camera_for(self, shot: Shot, t: float) -> CamKey:
         u = (t - shot.start) / max(1e-6, shot.end - shot.start)
@@ -139,6 +143,14 @@ class FrameRenderer:
         # title card on the establishing shot
         if ctx.title and t < 3.2:
             self._title(c, t)
+        if ctx.end_card_at is not None and t >= ctx.end_card_at and not ctx.shorts_window:
+            self._end_card(c, t - ctx.end_card_at)
+        if ctx.shorts_window:
+            a, b = ctx.shorts_window
+            if t - a < 2.6:
+                self._banner(c, ctx.series_name or "", (t - a), top=True)
+            if b - t < 3.2:
+                self._banner(c, "Tam bölüm YouTube'da ▶", 3.2 - (b - t), top=False)
         if self.burn:
             self._caption(c, t)
         return self.surface.makeImageSnapshot().toarray()
@@ -155,6 +167,29 @@ class FrameRenderer:
             x = (self.w - wdt) / 2
             c.drawString(text, x + 3 * s, yy + 3 * s, font, fill(col("#000000", 0.5 * a)))
             c.drawString(text, x, yy, font, fill(col("#fff6e0", a)))
+
+    def _end_card(self, c, dt):
+        a = min(1.0, dt / 0.8)
+        c.drawRect(skia.Rect.MakeWH(self.w, self.h), fill(col("#000000", 0.55 * a)))
+        s = self.h / 1080.0
+        f1 = skia.Font(self.face, 84 * s)
+        f2 = skia.Font(self.face_r, 40 * s)
+        for text, font, yy, color in (("Devam edecek...", f1, self.h * 0.46, "#ffd84a"),
+                                      ("Yeni bölümler için abone olun", f2, self.h * 0.46 + 80 * s, "#ffffff")):
+            wdt = font.measureText(text)
+            c.drawString(text, (self.w - wdt) / 2, yy, font, fill(col(color, a)))
+
+    def _banner(self, c, text, dt, top: bool):
+        if not text:
+            return
+        a = min(1.0, dt / 0.4)
+        s = self.w / 1080.0
+        font = skia.Font(self.face, 58 * s)
+        wdt = font.measureText(text)
+        y = self.h * (0.12 if top else 0.9)
+        r = skia.Rect.MakeXYWH((self.w - wdt) / 2 - 30 * s, y - 62 * s, wdt + 60 * s, 86 * s)
+        c.drawRRect(skia.RRect.MakeRectXY(r, 24 * s, 24 * s), fill(col("#c8382f" if not top else "#000000", 0.8 * a)))
+        c.drawString(text, (self.w - wdt) / 2, y, font, fill(col("#ffffff", a)))
 
     def _caption(self, c, t):
         text = next((tx for (s, e, tx) in self.ctx.captions if s <= t < e), None)

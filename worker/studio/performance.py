@@ -54,10 +54,11 @@ class Performance:
         self.spots = spots
         self.rng = random.Random(seed)
         self.chars = {cid: CharTracks() for cid in blocking}
-        self.env: dict[str, Track] = {"lamp": Track(), "boat_signal": Track(), "rain": Track(), "fireflies": Track()}
+        self.env: dict[str, Track] = {"lamp": Track(), "boat_signal": Track(), "rain": Track(), "fireflies": Track(),
+                                      "room_lamp": Track()}
         env0 = env0 or {}
         for k in self.env:
-            self.env[k].add(0.0, env0.get(k, 0.0))
+            self.env[k].add(0.0, env0.get(k, 1.0 if k == "room_lamp" else 0.0))
         for cid, ct in self.chars.items():
             b = blocking[cid]
             ct.pose.add(0.0, b.get("pose", "idle"))

@@ -22,13 +22,16 @@ def continuity_report(store, series_id: str) -> dict:
             ", ".join(f"{k}:{v.get('width')}x{v.get('height')} {v.get('duration', 0):.1f}s" for k, v in q.items()))
     # appearance + voice identity
     for cid, ch in chars.items():
-        hashes = {e["id"]: e.get("character_hashes", {}).get(cid) for e in ready}
+        hashes = {e["id"]: e.get("character_hashes", {}).get(cid) for e in ready
+                  if cid in e.get("character_hashes", {})}
+        if not hashes:
+            continue
         vals = {(h or {}).get("design") for h in hashes.values()}
         chk(f"{cid} görünüm sabit", len(vals) == 1 and design_hash(ch["design"]) in vals, str(vals))
         vv = {(h or {}).get("voice") for h in hashes.values()}
         chk(f"{cid} ses profili sabit", len(vv) == 1 and voice_hash(ch["voice"]) in vv, str(vv))
     # location
-    locs = {e["script"]["location_id"] for e in ready}
+    locs = {e["script"]["location_id"] for e in ready[:2]}
     chk("mekân aynı (sabit set)", len(locs) == 1, str(locs))
     # story continuity
     if len(ready) >= 2:

@@ -55,7 +55,8 @@ def _piper_voice(name: str):
 
 
 def voice_hash(profile: dict[str, Any]) -> str:
-    keys = ("engine", "model", "pitch_semitones", "speed", "noise_scale", "elevenlabs_voice_id")
+    keys = ("engine", "model", "pitch_semitones", "speed", "noise_scale", "elevenlabs_voice_id",
+            "azure_voice", "azure_pitch", "azure_rate", "azure_style")
     return hashlib.sha256(json.dumps({k: profile.get(k) for k in keys}, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -67,7 +68,7 @@ def wav_duration(path: Path) -> float:
 def synthesize(text: str, profile: dict[str, Any], out_wav: Path, cache_dir: Path | None = None) -> float:
     """Render one line to a mono 48 kHz wav.  Returns duration in seconds."""
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256((voice_hash(profile) + "|" + text).encode()).hexdigest()[:20]
+    key = hashlib.sha256((voice_hash(profile) + "|" + resolve_engine(profile) + "|" + text).encode()).hexdigest()[:20]
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached = cache_dir / f"{key}.wav"
@@ -75,10 +76,13 @@ def synthesize(text: str, profile: dict[str, Any], out_wav: Path, cache_dir: Pat
             out_wav.write_bytes(cached.read_bytes())
             return wav_duration(out_wav)
     raw = out_wav.with_suffix(".raw.wav")
-    use_eleven = (profile.get("elevenlabs_voice_id") and config.ELEVENLABS_API_KEY and config.ALLOW_PAID)
-    if use_eleven:
+    engine = resolve_engine(profile)
+    if engine == "elevenlabs":
         _eleven(text, profile, raw)
         pitch = 0.0
+    elif engine == "azure":
+        _azure(text, profile, raw)
+        pitch = 0.0          # prosody is applied inside SSML (formant-preserving)
     else:
         _piper(text, profile, raw)
         pitch = float(profile.get("pitch_semitones", 0.0))
@@ -87,6 +91,44 @@ def synthesize(text: str, profile: dict[str, Any], out_wav: Path, cache_dir: Pat
     if cache_dir:
         (cache_dir / f"{key}.wav").write_bytes(out_wav.read_bytes())
     return wav_duration(out_wav)
+
+
+def resolve_engine(profile: dict[str, Any]) -> str:
+    """Pick the best *allowed* engine for a voice profile; always falls back to free Piper."""
+    if profile.get("elevenlabs_voice_id") and config.ELEVENLABS_API_KEY and config.ALLOW_PAID:
+        return "elevenlabs"
+    if profile.get("azure_voice") and config.AZURE_SPEECH_KEY:
+        return "azure"     # Azure F0 free tier: 0.5M chars/month, commercial use allowed
+    return "piper"
+
+
+def azure_ssml(text: str, profile: dict[str, Any]) -> str:
+    from xml.sax.saxutils import escape
+    voice = profile.get("azure_voice", "tr-TR-EmelNeural")
+    lang = "-".join(voice.split("-")[:2])
+    pitch = profile.get("azure_pitch", "+0%")
+    rate = profile.get("azure_rate", "+0%")
+    style = profile.get("azure_style")
+    body = f'<prosody pitch="{pitch}" rate="{rate}">{escape(text)}</prosody>'
+    if style:
+        body = f'<mstts:express-as style="{style}">{body}</mstts:express-as>'
+    return (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{lang}">'
+            f'<voice name="{voice}">{body}</voice></speak>')
+
+
+def _azure(text: str, profile: dict[str, Any], out: Path):
+    region = config.AZURE_SPEECH_REGION
+    r = requests.post(
+        f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1",
+        headers={"Ocp-Apim-Subscription-Key": config.AZURE_SPEECH_KEY,
+                 "Content-Type": "application/ssml+xml",
+                 "X-Microsoft-OutputFormat": "riff-24khz-16bit-mono-pcm",
+                 "User-Agent": "cinema-studio-worker"},
+        data=azure_ssml(text, profile).encode("utf-8"), timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"Azure TTS {r.status_code}: {r.text[:200]}")
+    out.write_bytes(r.content)
 
 
 def _piper(text: str, profile: dict[str, Any], out: Path):

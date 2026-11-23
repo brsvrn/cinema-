@@ -28,6 +28,8 @@ R2_BUCKET = os.environ.get("R2_BUCKET", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY", "")
+AZURE_SPEECH_REGION = os.environ.get("AZURE_SPEECH_REGION", "westeurope")
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
 RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID", "")
 # GPU / paid engines must be explicitly allowed (user approval) even if keys exist.

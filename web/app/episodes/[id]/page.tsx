@@ -23,7 +23,10 @@ export default async function EpisodePage({ params }: { params: Promise<{ id: st
     <>
       <AutoRefresh active={busy} />
       <div className="row between"><h1>{ep.episode_number}. {ep.title}</h1><Badge s={ep.status} /></div>
-      <p className="muted"><Link href={`/series/${ep.series_id}`}>← dizi</Link> · mod: {ep.mode || "economic"} {ep.duration ? `· ${ep.duration.toFixed(1)} sn` : ""}</p>
+      <p className="muted"><Link href={`/series/${ep.series_id}`}>← dizi</Link> · mod: {ep.mode || "economic"}
+        {ep.duration ? ` · ${ep.duration >= 90 ? `${Math.floor(ep.duration / 60)} dk ${Math.round(ep.duration % 60)} sn` : `${ep.duration.toFixed(1)} sn`}` : ""}
+        {ep.scenes > 1 ? ` · ${ep.scenes} sahne` : ""}
+        {ep.duration >= 480 ? " · ✅ YouTube ara reklam uygun (8 dk+)" : ""}</p>
       {busy && (
         <div className="card">
           <div className="row between"><b>{ep.pipeline?.stage_label || "Kuyrukta, worker bekleniyor"}</b><span>%{ep.pipeline?.percent ?? 0}</span></div>
@@ -34,7 +37,9 @@ export default async function EpisodePage({ params }: { params: Promise<{ id: st
       )}
       {ep.error && <div className="card" style={{ borderColor: "var(--bad)" }}><b>Hata:</b> {ep.error}</div>}
       {yt && (<><h2>YouTube 1920×1080</h2><video controls playsInline preload="metadata" poster={thumb || undefined} src={yt} /></>)}
-      {sh && (<><h2>Shorts / Reels / TikTok 1080×1920</h2><div className="vertical"><video controls playsInline preload="metadata" src={sh} /></div></>)}
+      {sh && (<><h2>Shorts / Reels / TikTok 1080×1920</h2>
+        {ep.shorts_window && <p className="muted">Bölümün {Math.round(ep.shorts_window[0])}–{Math.round(ep.shorts_window[1])}. saniyeleri arasından otomatik seçilen kesit ({Math.round(ep.shorts_window[1] - ep.shorts_window[0])} sn).</p>}
+        <div className="vertical"><video controls playsInline preload="metadata" src={sh} /></div></>)}
       {ytDl && (
         <div className="card">
           <h3>İndir</h3>
