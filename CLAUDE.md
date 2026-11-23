@@ -81,6 +81,26 @@ Phone (PWA, Next.js on Vercel) ──server actions──► Supabase Postgres (
    optional character LoRA) refines economic-render keyframes. Requires `RUNPOD_API_KEY`,
    `RUNPOD_ENDPOINT_ID` and owner approval; the endpoint scales to zero after the job.
 
+## Long-form episodes (8–10 min, YouTube mid-roll ≥ 8 min)
+- Script may contain `scenes: [{id, title, location_id, lighting, music_mood, ambience, cast, blocking,
+  env_start, continuous, beats:[…]}]`. `pipeline.normalize_script` flattens beats (tagged `_scene`).
+- Timing: `storyboard.time_scenes` (natural pace; `min_seconds` lengthens pauses/actions, never dialogue);
+  short (single-scene ≤ 90 s) scripts still use `time_beats` to hit exactly 30 s.
+- Each scene gets its own render context (`Pipeline._contexts`): location+lighting, cast (only those characters
+  are drawn), blocking (continuous scenes inherit the previous scene's end state), performance, shots.
+- Vertical output for long episodes = auto-selected 45–58 s highlight (`shorts.json`, override with
+  `shorts_window: [first_beat_id, last_beat_id]`), with series banner + "Tam bölüm YouTube'da" CTA.
+- Long episodes end with a "Devam edecek…" card. Episode 3 (`studio/demo/episode3.py`) is the reference.
+- Scripts for long episodes are written by Claude Code in-session (owner's choice) — see skill `new-episode`.
+- Render cost: ~45–55 min wall time on 4 vCPU for ~8 min (both outputs); free on public-repo Actions.
+
+## Voices
+- Azure Speech F0 (free 0.5M chars/month, commercial OK) is the default when `AZURE_SPEECH_KEY` +
+  `AZURE_SPEECH_REGION` are set (GitHub secrets); profile keys `azure_voice/azure_pitch/azure_rate/azure_style`.
+  Turkish neural voices: tr-TR-EmelNeural (F), tr-TR-AhmetNeural (M) — vary pitch/rate per character.
+- Fallback: Piper (`tr_TR-dfki-medium`, one male voice, pitch-shifted). ElevenLabs only with paid approval.
+- Changing a voice profile changes `voice_hash` → run `character_sheets` with approve=true before producing.
+
 ## Pipeline stages (pipeline.STAGES)
 memory → script → continuity → storyboard → voices → animate → lipsync → staging → audio →
 render (per shot, per format, parallel) → assemble → qc → repair → upload → publish.
@@ -118,6 +138,9 @@ voice sample; `approve=true` marks approved).
 Cast: **Ada** (`chr_ada`, 10 y/o, red curls, yellow raincoat, Piper +5 st) and **Tomo Dede**
 (`chr_tomo`, retired captain, white beard, glasses, anchor cap, Piper −2.5 st).
 Location: **Martı Burnu Feneri** (`loc_marti_burnu`). Series `ser_fener` "Fener Bekçileri".
+Added for long-form: **Kaptan Nehir** (`chr_nehir`, Leyla's friend, captain of red-sailed *Yakamoz*),
+sets **Fener Odası** (`loc_fener_odasi`, kind `lighthouse_room`) and **Martı Limanı** (`loc_marti_limani`, kind `harbor`).
+Ep3 "Kırmızı Yelkenli" (8+ min, 4 scenes; open threads t_return_shell, t_cove_light). Seed: `python -m studio seed-ep3`.
 Ep1 "Sessiz Fener" (sunset; lamp fails, Ada finds glowing shell, boat signals) →
 Ep2 "Işıktan Mesaj" (night; Morse message, shell relights lamp; open thread: who is on the boat).
 `python -m studio acceptance` checks MP4s (both formats, 30 s, audio), identical design/voice

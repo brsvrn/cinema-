@@ -17,7 +17,10 @@ from . import config
 from .rig import EXPRESSIONS, POSES
 
 SCHEMA_DOC = """
-Return ONLY a JSON object:
+Return ONLY a JSON object. For long episodes (8-10 min) instead of top-level beats use
+"scenes": [{"id", "title", "location_id", "lighting", "music_mood", "ambience", "cast": [ids],
+            "blocking": {id: {"x", "dir"}}, "continuous": bool, "beats": [...]}] plus "min_seconds".
+Short (30 s) format:
 {
  "title": str (Turkish), "title_en": str,
  "lighting": "day"|"sunset"|"dusk"|"night",
