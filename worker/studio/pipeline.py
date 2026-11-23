@@ -366,7 +366,8 @@ class Pipeline:
                 sk = [s for s in shots if s.scene == k]
             caps = [(tb.start, tb.end + 0.15, tb.data["text"]) for tb in timed if tb.type == "line"]
             ctx = RenderContext(loc, rigs, perf, sk, total, caps,
-                                title=(series["title"], f"Bölüm {script['episode_number']}: {script['title']}") if k == 0 else None,
+                                title=(series["title"], f"Bölüm {script['episode_number']}: {script['title']}")
+                                if k == 0 and not (long_ and packaging.available()) else None,
                                 quality=self.quality)
             ctx.end_card_at = (total - 4.5) if long_ and not packaging.available() else None
             ctx.series_name = series["title"]
