@@ -1,0 +1,2 @@
+# Optional extras (installed by setup_worker.sh when STUDIO_OPTIONAL=1 or ANTHROPIC_API_KEY is set)
+headroom-ai==0.45.0   # local context compression for Claude API script writing (studio.writer.compact)

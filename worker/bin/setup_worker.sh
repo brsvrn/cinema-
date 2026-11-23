@@ -7,6 +7,13 @@ if command -v apt-get >/dev/null; then
   sudo apt-get install -y -qq ffmpeg libegl1 libgl1 fonts-dejavu-core unzip >/dev/null
 fi
 python -m pip install -q -r requirements.txt
+if [ "${STUDIO_OPTIONAL:-0}" = "1" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  python -m pip install -q -r requirements-optional.txt || echo "optional extras skipped"
+fi
+# Remotion packaging layer (intro + end screen) - needs Node.js; Chrome comes with the runner
+if command -v npm >/dev/null && [ -f ../remotion/package-lock.json ] && [ "${STUDIO_REMOTION:-1}" != "0" ]; then
+  (cd ../remotion && npm ci --no-audit --no-fund --loglevel=error) || echo "remotion install skipped"
+fi
 mkdir -p .models
 if [ ! -x .models/rhubarb/rhubarb ]; then
   curl -sL -o /tmp/rhubarb.zip https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v1.13.0/Rhubarb-Lip-Sync-1.13.0-Linux.zip

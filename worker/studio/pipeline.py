@@ -35,6 +35,7 @@ from .storyboard import Shot, TimedBeat, build_shots, episode_duration, time_bea
 from .camera import CamKey
 from .tts import synthesize
 from . import audio as audio_mod
+from . import packaging
 from . import writer
 
 STAGES = [
@@ -367,7 +368,7 @@ class Pipeline:
             ctx = RenderContext(loc, rigs, perf, sk, total, caps,
                                 title=(series["title"], f"Bölüm {script['episode_number']}: {script['title']}") if k == 0 else None,
                                 quality=self.quality)
-            ctx.end_card_at = (total - 4.5) if long_ else None
+            ctx.end_card_at = (total - 4.5) if long_ and not packaging.available() else None
             ctx.series_name = series["title"]
             end_blocking = {}
             for cid, ct in perf.chars.items():
@@ -648,9 +649,31 @@ class Pipeline:
                         "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(out)], check=True)
         return out
 
+    def _package(self, fmt: str, out: Path):
+        """Remotion intro + end screen around long YouTube episodes (optional, see packaging.py)."""
+        tl = self._timeline()
+        if fmt != "youtube" or not tl.get("long") or not packaging.available():
+            self.state.pop("packaging", None)
+            return
+        script = self._json_r("script.json")
+        series = self.store.get("series", self._ep()["series_id"])
+        import numpy as np
+        mood = script["scenes"][-1].get("music_mood") or series.get("music_mood", "warm")
+        m = audio_mod.music(packaging.END_S + 0.5, mood, seed=f"{series['id']}:{mood}")
+        wav = self.work / "packaging" / "end_music.wav"
+        wav.parent.mkdir(parents=True, exist_ok=True)
+        audio_mod.write_wav(wav, np.stack([m, m], axis=1) * 0.8)
+        n = script["episode_number"]
+        offset = packaging.package_long_episode(
+            out, self.work, series["title"], f"Bölüm {n}", script["title"],
+            script.get("next_title") or f"Bölüm {n + 1}", wav)
+        self.state["packaging"] = {"offset": offset, "tail": packaging.END_S}
+        self.log(f"  Remotion paketleme: +{offset:.0f} sn açılış, +{packaging.END_S:.0f} sn bitiş ekranı")
+
     def stage_assemble(self):
         for fmt in self.formats:
             out = self._assemble_format(fmt)
+            self._package(fmt, out)
             self._artifact(out)
 
     def _qc(self) -> dict:
@@ -671,7 +694,9 @@ class Pipeline:
             if win:
                 lo, hi = (win[1] - win[0]) - 1.0, min(60.0, (win[1] - win[0]) + 1.0)
             elif tl.get("long"):
-                lo, hi = tl["duration"] * 0.97, tl["duration"] * 1.03
+                pk = self.state.get("packaging") if fmt == "youtube" else None
+                extra = (pk["offset"] + pk["tail"]) if pk else 0.0
+                lo, hi = (tl["duration"] + extra) * 0.97, (tl["duration"] + extra) * 1.03
             else:
                 lo, hi = 28.0, 32.5
             report["formats"][fmt] = check_master(master, w, h, min_dur=lo, max_dur=hi)
@@ -694,7 +719,7 @@ class Pipeline:
                 if bad:
                     self.log(f"  yeniden render {fmt}: {bad}")
                     self._render_format(fmt, only=bad)
-                self._assemble_format(fmt)
+                self._package(fmt, self._assemble_format(fmt))
             rep = self._qc()
             self._json_w("qc.json", rep)
         if not rep["ok"]:
@@ -705,8 +730,9 @@ class Pipeline:
         script = self._json_r("script.json")
         outs: dict[str, str] = {}
         timed = self._timed()
-        tr = [(tb.start, tb.end + 0.15, tb.data["text"]) for tb in timed if tb.type == "line"]
-        en = [(tb.start, tb.end + 0.15, tb.data.get("text_en", "")) for tb in timed if tb.type == "line"]
+        off = (self.state.get("packaging") or {}).get("offset", 0.0)   # Remotion intro shifts the YouTube master
+        tr = [(tb.start + off, tb.end + 0.15 + off, tb.data["text"]) for tb in timed if tb.type == "line"]
+        en = [(tb.start + off, tb.end + 0.15 + off, tb.data.get("text_en", "")) for tb in timed if tb.type == "line"]
         files = {
             "srt_tr": write_srt(tr, self.work / "out" / f"{self.episode_id}.tr.srt"),
             "srt_en": write_srt(en, self.work / "out" / f"{self.episode_id}.en.srt"),
@@ -747,7 +773,9 @@ class Pipeline:
                                                      "location_id": last["location_id"]})
         self.store.put("series", series["id"], new_series)
         ep["status"] = "ready"
-        ep["duration"] = tl["duration"]
+        pk = self.state.get("packaging")
+        ep["duration"] = tl["duration"] + ((pk["offset"] + pk["tail"]) if pk else 0.0)
+        ep["packaging"] = pk
         ep["scenes"] = len(scs)
         ep["shorts_window"] = self._shorts_window_saved()
         used = {c for sc in scs for c in sc["perf"].chars}

@@ -45,6 +45,9 @@ jobs:
       - uses: actions/setup-python@v5
         if: env.pending != '0'
         with: { python-version: "3.12", cache: pip, cache-dependency-path: worker/requirements.txt }
+      - uses: actions/setup-node@v4
+        if: env.pending != '0'
+        with: { node-version: 22, cache: npm, cache-dependency-path: remotion/package-lock.json }
       - uses: actions/cache@v4
         if: env.pending != '0'
         with: { path: worker/.models, key: models-v1 }

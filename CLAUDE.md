@@ -101,6 +101,21 @@ Phone (PWA, Next.js on Vercel) ──server actions──► Supabase Postgres (
 - Fallback: Piper (`tr_TR-dfki-medium`, one male voice, pitch-shifted). ElevenLabs only with paid approval.
 - Changing a voice profile changes `voice_hash` → run `character_sheets` with approve=true before producing.
 
+## Third-party tooling (installed 2026-11-23)
+- **obra/superpowers** (MIT) — agent skills committed under `.claude/skills/` (brainstorming, writing-plans,
+  systematic-debugging, test-driven-development, verification-before-completion, …). License:
+  `.claude/skills/SUPERPOWERS-LICENSE.txt`. Use them: plan before building, verify before claiming done.
+- **remotion-dev/skills** — pinned in `skills-lock.json`, NOT committed (no license file); restored at session
+  start by `.claude/hooks/restore-skills.sh` (SessionStart hook in `.claude/settings.json`).
+- **Remotion** (`remotion/`, v4) — packaging layer: compositions `Intro` (3 s), `IntroVertical`, `EndScreen`
+  (10 s YouTube end screen with "next episode" + subscribe zones). `worker/studio/packaging.py` renders only
+  these clips (Chrome headless), re-encodes them with the episode's x264 params and stream-concats around long
+  YouTube masters; subtitles are shifted by the intro offset. Disable with `STUDIO_REMOTION=0`.
+  Remotion license: free for individuals / companies ≤ 3 people.
+- **Headroom** (`headroom-ai`, Apache-2.0) — optional (`worker/requirements-optional.txt`); `writer.compact()`
+  compresses the Series Bible JSON before Claude API calls (offline mode). It cannot wrap this cloud
+  Claude Code session (its API traffic is platform-managed); `headroom wrap claude` is for local machines.
+
 ## Pipeline stages (pipeline.STAGES)
 memory → script → continuity → storyboard → voices → animate → lipsync → staging → audio →
 render (per shot, per format, parallel) → assemble → qc → repair → upload → publish.

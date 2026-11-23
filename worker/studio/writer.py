@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -70,6 +71,24 @@ def _json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
+def compact(text: str) -> str:
+    """Compress large context (Series Bible JSON) with Headroom when installed; otherwise unchanged.
+
+    Headroom runs locally (HEADROOM_OFFLINE=1 keeps it zero-network) and preserves meaning while
+    cutting input tokens - useful as the bible grows with every episode."""
+    try:
+        from headroom import compress
+    except ImportError:
+        return text
+    os.environ.setdefault("HEADROOM_OFFLINE", "1")
+    try:
+        r = compress([{"role": "user", "content": text}], model=config.ANTHROPIC_MODEL, compress_user_messages=True)
+        out = r.messages[0].get("content")
+        return out if isinstance(out, str) and out else text
+    except Exception:  # noqa: BLE001 - never block script writing on an optimisation
+        return text
+
+
 def write_episode(memory: dict, topic: str, episode_number: int, location: dict) -> dict:
     if config.ANTHROPIC_API_KEY:
         return _write_llm(memory, topic, episode_number, location)
@@ -81,7 +100,7 @@ def _write_llm(memory: dict, topic: str, n: int, location: dict) -> dict:
               "continuity with the Series Bible: never contradict past events, characters may only use facts "
               "they know (see 'knows'), keep personalities and relationships, respect universe rules, and "
               "advance or resolve open threads. Episodes are 30 seconds long.")
-    user = (f"SERIES BIBLE MEMORY:\n{json.dumps(memory, ensure_ascii=False)}\n\n"
+    user = (f"SERIES BIBLE MEMORY:\n{compact(json.dumps(memory, ensure_ascii=False))}\n\n"
             f"EPISODE NUMBER: {n}\nUSER TOPIC: {topic}\nLOCATION: {location['id']}\n\n"
             f"ALLOWED VOCABULARY:\n{_vocab(location)}\n\n{SCHEMA_DOC}")
     script = _json(claude([{"role": "user", "content": user}], system))
@@ -96,7 +115,7 @@ def review_llm(script: dict, memory: dict) -> dict:
     if not config.ANTHROPIC_API_KEY:
         return {"ok": True, "issues": [], "skipped": True}
     txt = claude([{"role": "user", "content":
-                   f"Bible:\n{json.dumps(memory, ensure_ascii=False)}\n\nNew episode:\n"
+                   f"Bible:\n{compact(json.dumps(memory, ensure_ascii=False))}\n\nNew episode:\n"
                    f"{json.dumps(script, ensure_ascii=False)}\n\nList continuity errors (contradictions, characters "
                    f"knowing things they shouldn't, personality breaks). Return JSON {{\"ok\":bool,\"issues\":[str]}}."}],
                  "You are a meticulous script supervisor.", 1500)

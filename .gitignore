@@ -13,3 +13,9 @@ worker/.models/
 node_modules/
 .next/
 .vercel/
+
+# third-party agent skills restored from skills-lock.json (not redistributed)
+.claude/skills/remotion-*
+
+# Claude agent skill copies managed by the skills CLI
+.agents/
